@@ -1,0 +1,49 @@
+[project]
+name = "meshmaker-ai"
+version = "0.1.0"
+description = "Hunyuan3D-2 server environment for MeshMaker AI 3D generation"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "diffusers>=0.31,<0.33",
+    "transformers>=4.48.0,<5",
+    "sentencepiece",
+    "protobuf",
+    "numpy<2.4",
+    # Mesh processing
+    "trimesh",
+    "pymeshlab",
+    "pygltflib",
+    "xatlas",
+    # ML utilities
+    "einops",
+    "omegaconf",
+    "accelerate",
+    "opencv-python",
+    "tqdm",
+    "ninja",
+    "pybind11",
+    # Server / API
+    "fastapi",
+    "uvicorn",
+    "rembg",
+    "onnxruntime",
+    "pillow",
+]
+
+[tool.uv]
+find-links = ["https://download.pytorch.org/whl/cu128"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"

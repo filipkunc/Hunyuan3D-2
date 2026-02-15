@@ -392,6 +392,12 @@ class FlashVDMVolumeDecoding:
             nidx = torch.where(next_index > 0)
 
             next_points = torch.stack(nidx, dim=1)
+
+            # Skip refinement if no candidate surface points at this resolution
+            if next_points.shape[0] == 0:
+                grid_logits = next_logits.unsqueeze(0)
+                continue
+
             next_points = (next_points * torch.tensor(resolution, dtype=torch.float32, device=device) +
                            torch.tensor(bbox_min, dtype=torch.float32, device=device))
 
