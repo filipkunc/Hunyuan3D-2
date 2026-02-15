@@ -782,22 +782,29 @@ if __name__ == '__main__':
         except Exception:
             return 0.0, 0.0
 
-    def _set_progress(uid, stage):
+    def _set_progress(uid, stage, percent=None):
         used, total = _gpu_mem_info()
         task_progress[str(uid)] = {
             'stage': stage,
+            'percent': percent,
             'gpu_used_gb': used,
             'gpu_total_gb': total,
         }
-        logger.info(f"[{uid}] {stage}  [GPU: {used:.1f}/{total:.1f} GB]")
+        pct_str = f" {percent}%" if percent is not None else ""
+        logger.info(f"[{uid}]{pct_str} {stage}  [GPU: {used:.1f}/{total:.1f} GB]")
 
     @torch.inference_mode()
     def _do_generate(uid, params):
         import tempfile
+        from hy3dgen.shapegen.pipelines import export_to_trimesh
+
+        do_texture = params.get('texture', False) and HAS_TEXTUREGEN
+        # Estimate total steps for percentage: rembg(5%) + shape(70%) + texture(20%) + export(5%)
+        # Without texture: rembg(5%) + shape(85%) + export(10%)
 
         # Image or text input
         if 'image' in params:
-            _set_progress(uid, 'Loading input image')
+            _set_progress(uid, 'Loading image', 0)
             image = Image.open(BytesIO(base64.b64decode(params['image'])))
         elif 'text' in params:
             if not HAS_T2I:
@@ -805,19 +812,19 @@ if __name__ == '__main__':
                     "Text-to-3D requires the server to be started with --enable_t23d. "
                     "Restart with: python gradio_app.py --enable_t23d"
                 )
-            _set_progress(uid, 'Generating image from text')
+            _set_progress(uid, 'Generating image from text', 0)
 
             def _t2i_step_callback(pipe, step_index, timestep, callback_kwargs):
-                _set_progress(uid, f'Text-to-image: step {step_index + 1}/25')
+                pct = int((step_index + 1) / 25 * 10)  # 0-10%
+                _set_progress(uid, f'Text to image ({step_index + 1}/25)', pct)
                 return callback_kwargs
 
             image = t2i_worker(params['text'], callback_on_step_end=_t2i_step_callback)
-            _set_progress(uid, 'Text-to-image done')
         else:
             raise ValueError("No input image or text provided")
 
         if not params.get('no_rembg', False):
-            _set_progress(uid, 'Removing background')
+            _set_progress(uid, 'Removing background', 10)
             image = rmbg_worker(image.convert('RGB'))
 
         seed = params.get('seed', 1234)
@@ -825,12 +832,12 @@ if __name__ == '__main__':
         num_inference_steps = params.get('num_inference_steps', 5)
         guidance_scale = params.get('guidance_scale', 5.0)
 
-        _set_progress(uid, f'Shape generation (octree={octree_resolution}, steps={num_inference_steps})')
+        _set_progress(uid, 'Generating shape', 15)
         start_time = time.time()
 
         generator = torch.Generator()
         generator = generator.manual_seed(int(seed))
-        mesh = i23d_worker(
+        outputs = i23d_worker(
             image=image,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
@@ -838,9 +845,10 @@ if __name__ == '__main__':
             octree_resolution=octree_resolution,
             num_chunks=200000,
             output_type='mesh',
-        )[0]
+        )
+        mesh = export_to_trimesh(outputs)[0]
         elapsed = time.time() - start_time
-        _set_progress(uid, f'Shape generation done in {elapsed:.1f}s')
+        _set_progress(uid, f'Shape done ({elapsed:.0f}s)', 70 if do_texture else 85)
 
         if mesh is None:
             raise ValueError(
@@ -848,16 +856,16 @@ if __name__ == '__main__':
                 "Try a different image or prompt, or lower the octree resolution."
             )
 
-        if params.get('texture', False) and HAS_TEXTUREGEN:
-            _set_progress(uid, 'Cleaning mesh for texture')
+        if do_texture:
+            _set_progress(uid, 'Cleaning mesh', 72)
             mesh = floater_remove_worker(mesh)
             mesh = degenerate_face_remove_worker(mesh)
             mesh = face_reduce_worker(mesh, max_facenum=params.get('face_count', 40000))
-            _set_progress(uid, 'Generating texture')
+            _set_progress(uid, 'Generating texture', 75)
             mesh = texgen_worker(mesh, image)
-            _set_progress(uid, 'Texture generation done')
+            _set_progress(uid, 'Texture done', 95)
 
-        _set_progress(uid, 'Exporting model')
+        _set_progress(uid, 'Exporting model', 95)
         save_path = os.path.join(SAVE_DIR, f'{str(uid)}.glb')
         with tempfile.NamedTemporaryFile(suffix='.glb', delete=False) as temp_file:
             mesh.export(temp_file.name)
@@ -870,7 +878,7 @@ if __name__ == '__main__':
 
     def _run_generate(uid, params):
         try:
-            _set_progress(uid, 'Starting generation')
+            _set_progress(uid, 'Starting', 0)
             _do_generate(uid, params)
             task_progress.pop(str(uid), None)
             logger.info(f"[{uid}] Generation thread completed")
@@ -918,11 +926,12 @@ if __name__ == '__main__':
                 'error': 'Generation crashed unexpectedly (possible GPU out-of-memory). Check server logs.',
             })
 
-        # Include progress stage and GPU info
+        # Include progress stage, percentage, and GPU info
         progress = task_progress.get(uid, {})
         return JSONResponse({
             'status': 'processing',
             'stage': progress.get('stage', ''),
+            'percent': progress.get('percent'),
             'gpu_used_gb': progress.get('gpu_used_gb', 0),
             'gpu_total_gb': progress.get('gpu_total_gb', 0),
         })
