@@ -27,6 +27,7 @@ dependencies = [
     # Server / API
     "fastapi",
     "uvicorn",
+    "gradio",
     "rembg",
     "onnxruntime",
     "pillow",
