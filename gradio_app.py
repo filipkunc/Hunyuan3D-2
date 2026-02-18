@@ -12,27 +12,22 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
-import base64
 import os
 import random
 import shutil
-import threading
 import time
-import traceback
+import uuid
 from glob import glob
-from io import BytesIO
 from pathlib import Path
 
 import gradio as gr
 import torch
 import trimesh
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-import uuid
 
 from hy3dgen.shapegen.utils import logger
 
@@ -546,7 +541,8 @@ def build_app():
                 num_chunks,
                 randomize_seed,
             ],
-            outputs=[file_out, html_gen_mesh, stats, seed]
+            outputs=[file_out, html_gen_mesh, stats, seed],
+            api_name="shape_generation",
         ).then(
             lambda: (gr.update(visible=False, value=False), gr.update(interactive=True), gr.update(interactive=True),
                      gr.update(interactive=False)),
@@ -573,7 +569,8 @@ def build_app():
                 num_chunks,
                 randomize_seed,
             ],
-            outputs=[file_out, file_out2, html_gen_mesh, stats, seed]
+            outputs=[file_out, file_out2, html_gen_mesh, stats, seed],
+            api_name="generation_all",
         ).then(
             lambda: (gr.update(visible=True, value=True), gr.update(interactive=False), gr.update(interactive=True),
                      gr.update(interactive=False)),
@@ -754,7 +751,7 @@ if __name__ == '__main__':
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -764,177 +761,6 @@ if __name__ == '__main__':
     static_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
     shutil.copytree('./assets/env_maps', os.path.join(static_dir, 'env_maps'), dirs_exist_ok=True)
-
-    # ── MeshMaker REST API ──────────────────────────────────────────
-    # These endpoints mirror the api_server.py contract so MeshMaker's
-    # React frontend can call the same Gradio-loaded pipelines.
-
-    task_errors = {}    # uid -> error message
-    task_threads = {}   # uid -> Thread object
-    task_progress = {}  # uid -> {stage, gpu_used_gb, gpu_total_gb}
-
-    def _gpu_mem_info():
-        try:
-            free, total = torch.cuda.mem_get_info(0)
-            used = (total - free) / (1024 ** 3)
-            total_gb = total / (1024 ** 3)
-            return round(used, 1), round(total_gb, 1)
-        except Exception:
-            return 0.0, 0.0
-
-    def _set_progress(uid, stage, percent=None):
-        used, total = _gpu_mem_info()
-        task_progress[str(uid)] = {
-            'stage': stage,
-            'percent': percent,
-            'gpu_used_gb': used,
-            'gpu_total_gb': total,
-        }
-        pct_str = f" {percent}%" if percent is not None else ""
-        logger.info(f"[{uid}]{pct_str} {stage}  [GPU: {used:.1f}/{total:.1f} GB]")
-
-    @torch.inference_mode()
-    def _do_generate(uid, params):
-        import tempfile
-        from hy3dgen.shapegen.pipelines import export_to_trimesh
-
-        do_texture = params.get('texture', False) and HAS_TEXTUREGEN
-        # Estimate total steps for percentage: rembg(5%) + shape(70%) + texture(20%) + export(5%)
-        # Without texture: rembg(5%) + shape(85%) + export(10%)
-
-        # Image or text input
-        if 'image' in params:
-            _set_progress(uid, 'Loading image', 0)
-            image = Image.open(BytesIO(base64.b64decode(params['image'])))
-        elif 'text' in params:
-            if not HAS_T2I:
-                raise ValueError(
-                    "Text-to-3D requires the server to be started with --enable_t23d. "
-                    "Restart with: python gradio_app.py --enable_t23d"
-                )
-            _set_progress(uid, 'Generating image from text', 0)
-
-            def _t2i_step_callback(pipe, step_index, timestep, callback_kwargs):
-                pct = int((step_index + 1) / 25 * 10)  # 0-10%
-                _set_progress(uid, f'Text to image ({step_index + 1}/25)', pct)
-                return callback_kwargs
-
-            image = t2i_worker(params['text'], callback_on_step_end=_t2i_step_callback)
-        else:
-            raise ValueError("No input image or text provided")
-
-        if not params.get('no_rembg', False):
-            _set_progress(uid, 'Removing background', 10)
-            image = rmbg_worker(image.convert('RGB'))
-
-        seed = params.get('seed', 1234)
-        octree_resolution = params.get('octree_resolution', 256)
-        num_inference_steps = params.get('num_inference_steps', 5)
-        guidance_scale = params.get('guidance_scale', 5.0)
-
-        _set_progress(uid, 'Generating shape', 15)
-        start_time = time.time()
-
-        generator = torch.Generator()
-        generator = generator.manual_seed(int(seed))
-        outputs = i23d_worker(
-            image=image,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            octree_resolution=octree_resolution,
-            num_chunks=200000,
-            output_type='mesh',
-        )
-        mesh = export_to_trimesh(outputs)[0]
-        elapsed = time.time() - start_time
-        _set_progress(uid, f'Shape done ({elapsed:.0f}s)', 70 if do_texture else 85)
-
-        if mesh is None:
-            raise ValueError(
-                "Failed to generate a valid 3D shape from this input. "
-                "Try a different image or prompt, or lower the octree resolution."
-            )
-
-        if do_texture:
-            _set_progress(uid, 'Cleaning mesh', 72)
-            mesh = floater_remove_worker(mesh)
-            mesh = degenerate_face_remove_worker(mesh)
-            mesh = face_reduce_worker(mesh, max_facenum=params.get('face_count', 40000))
-            _set_progress(uid, 'Generating texture', 75)
-            mesh = texgen_worker(mesh, image)
-            _set_progress(uid, 'Texture done', 95)
-
-        _set_progress(uid, 'Exporting model', 95)
-        save_path = os.path.join(SAVE_DIR, f'{str(uid)}.glb')
-        with tempfile.NamedTemporaryFile(suffix='.glb', delete=False) as temp_file:
-            mesh.export(temp_file.name)
-            loaded = trimesh.load(temp_file.name)
-            loaded.export(save_path)
-
-        if args.low_vram_mode:
-            torch.cuda.empty_cache()
-        logger.info(f"[{uid}] Saved to {save_path}")
-
-    def _run_generate(uid, params):
-        try:
-            _set_progress(uid, 'Starting', 0)
-            _do_generate(uid, params)
-            task_progress.pop(str(uid), None)
-            logger.info(f"[{uid}] Generation thread completed")
-        except Exception as e:
-            traceback.print_exc()
-            logger.error(f"[{uid}] Generation failed: {e}")
-            task_errors[str(uid)] = str(e)
-            task_progress.pop(str(uid), None)
-
-    @app.get("/api/health")
-    async def api_health():
-        return JSONResponse({'status': 'ok'})
-
-    @app.post("/api/send")
-    async def api_send(request: Request):
-        params = await request.json()
-        uid = uuid.uuid4()
-        uid_str = str(uid)
-        t = threading.Thread(target=_run_generate, args=(uid, params,), daemon=True)
-        task_threads[uid_str] = t
-        t.start()
-        return JSONResponse({"uid": uid_str})
-
-    @app.get("/api/status/{uid}")
-    async def api_status(uid: str):
-        # Check for explicit error first
-        if uid in task_errors:
-            error_msg = task_errors.pop(uid)
-            task_threads.pop(uid, None)
-            return JSONResponse({'status': 'failed', 'error': error_msg})
-
-        # Check if output file exists
-        save_file_path = os.path.join(SAVE_DIR, f'{uid}.glb')
-        if os.path.exists(save_file_path):
-            task_threads.pop(uid, None)
-            base64_str = base64.b64encode(open(save_file_path, 'rb').read()).decode()
-            return JSONResponse({'status': 'completed', 'model_base64': base64_str})
-
-        # Check if the worker thread is still alive
-        thread = task_threads.get(uid)
-        if thread is not None and not thread.is_alive():
-            task_threads.pop(uid, None)
-            return JSONResponse({
-                'status': 'failed',
-                'error': 'Generation crashed unexpectedly (possible GPU out-of-memory). Check server logs.',
-            })
-
-        # Include progress stage, percentage, and GPU info
-        progress = task_progress.get(uid, {})
-        return JSONResponse({
-            'status': 'processing',
-            'stage': progress.get('stage', ''),
-            'percent': progress.get('percent'),
-            'gpu_used_gb': progress.get('gpu_used_gb', 0),
-            'gpu_total_gb': progress.get('gpu_total_gb', 0),
-        })
 
     if args.low_vram_mode:
         torch.cuda.empty_cache()
