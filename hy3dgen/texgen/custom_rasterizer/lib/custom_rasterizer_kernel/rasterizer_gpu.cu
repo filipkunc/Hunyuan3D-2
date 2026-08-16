@@ -97,31 +97,16 @@ __global__ void rasterizeImagecoordsKernelGPU(float* V, int* F, float* d, INT64*
     rasterizeTriangleGPU(f, vt0, vt1, vt2, width, height, zbuffer, d, occlusion_trunc);
 }
 
-std::vector<torch::Tensor> rasterize_image_gpu(torch::Tensor V, torch::Tensor F, torch::Tensor D,
-    int width, int height, float occlusion_truncation, int use_depth_prior)
-{
-    int device_id = V.get_device();
-    cudaSetDevice(device_id);
-    int num_faces = F.size(0);
-    int num_vertices = V.size(0);
-    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, device_id).requires_grad(false);
-    auto INT64_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA, device_id).requires_grad(false);
-    auto findices = torch::zeros({height, width}, options);
-    INT64 maxint = (INT64)MAXINT * (INT64)MAXINT + (MAXINT - 1);
-    auto z_min = torch::ones({height, width}, INT64_options) * (int64_t)maxint;
-
-    if (!use_depth_prior) {
-        rasterizeImagecoordsKernelGPU<<<(num_faces+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(V.data_ptr<float>(), F.data_ptr<int>(), 0,
-            (INT64*)z_min.data_ptr<int64_t>(), occlusion_truncation, width, height, num_vertices, num_faces); 
-    } else {
-        rasterizeImagecoordsKernelGPU<<<(num_faces+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(V.data_ptr<float>(), F.data_ptr<int>(), D.data_ptr<float>(),
-            (INT64*)z_min.data_ptr<int64_t>(), occlusion_truncation, width, height, num_vertices, num_faces); 
-    }
-
-    auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, device_id).requires_grad(false);
-    auto barycentric = torch::zeros({height, width, 3}, float_options);
-    barycentricFromImgcoordGPU<<<(width * height + 255)/256, 256>>>(V.data_ptr<float>(), F.data_ptr<int>(),
-        findices.data_ptr<int>(), (INT64*)z_min.data_ptr<int64_t>(), width, height, num_vertices, num_faces, barycentric.data_ptr<float>());
-
-    return {findices, barycentric};
+void rasterize_image_gpu_launcher(
+    float* vertices, int* faces, float* depth, int* face_indices,
+    INT64* zbuffer, float* barycentric, int width, int height,
+    int num_vertices, int num_faces, float occlusion_truncation,
+    int use_depth_prior, cudaStream_t stream) {
+    float* depth_prior = use_depth_prior ? depth : nullptr;
+    rasterizeImagecoordsKernelGPU<<<(num_faces + 255) / 256, 256, 0, stream>>>(
+        vertices, faces, depth_prior, zbuffer, occlusion_truncation,
+        width, height, num_vertices, num_faces);
+    barycentricFromImgcoordGPU<<<(width * height + 255) / 256, 256, 0, stream>>>(
+        vertices, faces, face_indices, zbuffer, width, height,
+        num_vertices, num_faces, barycentric);
 }

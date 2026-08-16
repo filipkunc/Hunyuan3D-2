@@ -158,16 +158,24 @@ export PATH="$CUDA_HOME/bin:$PATH"
 CUDA_RELEASE="$(nvcc_release "$CUDA_HOME")"
 ok "Using CUDA toolkit $CUDA_RELEASE at $CUDA_HOME"
 
-# CUDA 12.x officially supports GCC through version 14. Prefer a compatible
-# side-by-side compiler when the distribution default is newer.
-if [[ "$TORCH_MAJOR" == "12" ]]; then
+# Prefer a supported side-by-side compiler when the distribution default is
+# newer than the toolkit supports. CUDA 12.x supports GCC through 14, while
+# CUDA 13.x supports GCC through 15.
+CUDA_MAJOR="${CUDA_RELEASE%%.*}"
+SUPPORTED_GCC_MAX=""
+case "$CUDA_MAJOR" in
+    12) SUPPORTED_GCC_MAX=14 ;;
+    13) SUPPORTED_GCC_MAX=15 ;;
+esac
+
+if [[ -n "$SUPPORTED_GCC_MAX" ]]; then
     DEFAULT_CXX="${CXX:-$(command -v g++ || true)}"
     [[ -n "$DEFAULT_CXX" ]] || err "no C++ compiler found"
     DEFAULT_CXX_MAJOR="$($DEFAULT_CXX -dumpversion | cut -d. -f1)"
 
-    if ((DEFAULT_CXX_MAJOR > 14)); then
+    if ((DEFAULT_CXX_MAJOR > SUPPORTED_GCC_MAX)); then
         COMPATIBLE_CXX=""
-        for version in 14 13 12 11; do
+        for ((version = SUPPORTED_GCC_MAX; version >= 11; version--)); do
             if command -v "g++-$version" >/dev/null 2>&1; then
                 COMPATIBLE_CXX="$(command -v "g++-$version")"
                 break
@@ -175,11 +183,12 @@ if [[ "$TORCH_MAJOR" == "12" ]]; then
         done
 
         if [[ -n "$COMPATIBLE_CXX" ]]; then
-            export CC="$COMPATIBLE_CXX"
+            COMPATIBLE_CC="$(command -v "gcc-${COMPATIBLE_CXX##*-}" || true)"
+            export CC="${COMPATIBLE_CC:-$COMPATIBLE_CXX}"
             export CXX="$COMPATIBLE_CXX"
             ok "Using $COMPATIBLE_CXX as the CUDA host compiler"
         else
-            warn "$DEFAULT_CXX is GCC $DEFAULT_CXX_MAJOR; CUDA 12.x supports GCC through 14. The build will use --allow-unsupported-compiler and may still fail."
+            warn "$DEFAULT_CXX is GCC $DEFAULT_CXX_MAJOR; CUDA $CUDA_MAJOR.x supports GCC through $SUPPORTED_GCC_MAX. The build will use --allow-unsupported-compiler and may still fail."
         fi
     fi
 fi
@@ -210,6 +219,7 @@ info "Building and installing custom_rasterizer (CUDA)"
 
 info "Verifying native-extension imports"
 "$VENV_PY" - <<'PY'
+import torch
 import custom_rasterizer
 import custom_rasterizer_kernel
 from hy3dgen.texgen.differentiable_renderer import mesh_processor

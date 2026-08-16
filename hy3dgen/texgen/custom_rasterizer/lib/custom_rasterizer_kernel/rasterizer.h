@@ -1,10 +1,13 @@
 #ifndef RASTERIZER_H_
 #define RASTERIZER_H_
 
+#ifdef __CUDACC__
+#include <cuda_runtime.h>
+#else
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#endif
 #include <vector>
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h> // For CUDA context
 
 #define INT64 unsigned long long
 #define MAXINT 2147483647
@@ -40,6 +43,13 @@ __host__ __device__  inline bool isBarycentricCoordInBounds(float* barycentricCo
            barycentricCoord[2] >= 0.0 && barycentricCoord[2] <= 1.0;
 }
 
+void rasterize_image_gpu_launcher(
+    float* vertices, int* faces, float* depth, int* face_indices,
+    INT64* zbuffer, float* barycentric, int width, int height,
+    int num_vertices, int num_faces, float occlusion_truncation,
+    int use_depth_prior, cudaStream_t stream);
+
+#ifndef __CUDACC__
 std::vector<torch::Tensor> rasterize_image_gpu(torch::Tensor V, torch::Tensor F, torch::Tensor D,
     int width, int height, float occlusion_truncation, int use_depth_prior);
 
@@ -50,5 +60,6 @@ std::vector<std::vector<torch::Tensor>> build_hierarchy_with_feat(
     std::vector<torch::Tensor> view_layer_normals,
     std::vector<torch::Tensor> view_layer_feats,
     int num_level, int resolution);
+#endif // __CUDACC__
 
 #endif
