@@ -177,12 +177,16 @@ Please install Pytorch via the [official](https://pytorch.org/) site. Then insta
 ```bash
 pip install -r requirements.txt
 pip install -e .
-# for texture
-cd hy3dgen/texgen/custom_rasterizer
-python3 setup.py install
-cd ../../..
-cd hy3dgen/texgen/differentiable_renderer
-python3 setup.py install
+
+# Native extensions required for texture generation on Linux.
+# PyTorch and nvcc must use the same CUDA major version.
+./build_extensions.sh
+```
+
+On Windows, run the equivalent PowerShell script instead:
+
+```powershell
+.\build_extensions.ps1
 ```
 
 ### Code Usage
