@@ -180,6 +180,9 @@ uv sync
 # Native extensions required for texture generation on Linux.
 # Install a CUDA 13.x toolkit first; an exact 13.0 match is preferred.
 ./build_extensions.sh
+
+# Verify the CPU and CUDA rasterizers.
+uv run python -m unittest -v test_native_extensions.py
 ```
 
 On Windows, run the equivalent PowerShell script after `uv sync` and installing the CUDA 12.8 toolkit:
