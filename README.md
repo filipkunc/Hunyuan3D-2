@@ -172,17 +172,23 @@ Hunyuan3D 2.0 supports Macos, Windows, Linux. You may follow the next steps to u
 
 ### Install Requirements
 
-Please install Pytorch via the [official](https://pytorch.org/) site. Then install the other requirements via
+Create the project environment with [uv](https://docs.astral.sh/uv/). Linux uses the PyTorch CUDA 13.0 wheels, while Windows uses CUDA 12.8:
 
 ```bash
-pip install -r requirements.txt
-pip install -e .
-# for texture
-cd hy3dgen/texgen/custom_rasterizer
-python3 setup.py install
-cd ../../..
-cd hy3dgen/texgen/differentiable_renderer
-python3 setup.py install
+uv sync
+
+# Native extensions required for texture generation on Linux.
+# Install a CUDA 13.x toolkit first; an exact 13.0 match is preferred.
+./build_extensions.sh
+
+# Verify the CPU and CUDA rasterizers.
+uv run python -m unittest -v test_native_extensions.py
+```
+
+On Windows, run the equivalent PowerShell script after `uv sync` and installing the CUDA 12.8 toolkit:
+
+```powershell
+.\build_extensions.ps1
 ```
 
 ### Code Usage

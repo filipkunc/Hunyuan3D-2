@@ -1,5 +1,30 @@
 #include "rasterizer.h"
 
+std::vector<torch::Tensor> rasterize_image_gpu(torch::Tensor V, torch::Tensor F, torch::Tensor D,
+    int width, int height, float occlusion_truncation, int use_depth_prior)
+{
+    int device_id = V.get_device();
+    cudaSetDevice(device_id);
+    int num_faces = F.size(0);
+    int num_vertices = V.size(0);
+    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, device_id).requires_grad(false);
+    auto INT64_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA, device_id).requires_grad(false);
+    auto findices = torch::zeros({height, width}, options);
+    INT64 maxint = (INT64)MAXINT * (INT64)MAXINT + (MAXINT - 1);
+    auto z_min = torch::ones({height, width}, INT64_options) * (int64_t)maxint;
+    auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, device_id).requires_grad(false);
+    auto barycentric = torch::zeros({height, width, 3}, float_options);
+    float* depth = use_depth_prior ? D.data_ptr<float>() : nullptr;
+
+    rasterize_image_gpu_launcher(
+        V.data_ptr<float>(), F.data_ptr<int>(), depth,
+        findices.data_ptr<int>(), reinterpret_cast<INT64*>(z_min.data_ptr<int64_t>()),
+        barycentric.data_ptr<float>(), width, height, num_vertices, num_faces,
+        occlusion_truncation, use_depth_prior, at::cuda::getCurrentCUDAStream());
+
+    return {findices, barycentric};
+}
+
 void rasterizeTriangleCPU(int idx, float* vt0, float* vt1, float* vt2, int width, int height, INT64* zbuffer, float* d, float occlusion_truncation) {
     float x_min = std::min(vt0[0], std::min(vt1[0],vt2[0]));
     float x_max = std::max(vt0[0], std::max(vt1[0],vt2[0]));
@@ -12,7 +37,7 @@ void rasterizeTriangleCPU(int idx, float* vt0, float* vt1, float* vt2, int width
         for (int py = y_min; py < y_max + 1; ++py) {
             if (py < 0 || py >= height)
                 continue;
-            float vt[2] = {px + 0.5, py + 0.5};
+            float vt[2] = {px + 0.5f, py + 0.5f};
             float baryCentricCoordinate[3];
             calculateBarycentricCoordinate(vt0, vt1, vt2, vt, baryCentricCoordinate);
             if (isBarycentricCoordInBounds(baryCentricCoordinate)) {
